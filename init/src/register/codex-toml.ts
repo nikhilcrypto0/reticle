@@ -147,8 +147,14 @@ export function codexDeclaresOurServer(existing: string | null, serversKey: stri
   return 0 < codexServerTokens(existing, serversKey).length;
 }
 
-/** `reticle = …` or `"reticle" = …` somewhere inside an inline table's text. */
-const OUR_KEY_INLINE = new RegExp(`(^|[\\s{,])["']?${MCP_SERVER_NAME}["']?\\s*=`);
+/**
+ * Our key, as a KEY, inside an inline table's text: `reticle = …`, `"reticle" = …`, or the dotted
+ * `reticle.command = …`. A key follows the `{` or a `,`, and its quotes match, so a value that merely
+ * starts with the name (`command = "reticle.js"`) is not one.
+ */
+const OUR_KEY_INLINE = new RegExp(
+  `(?:^|[{,])\\s*(?:${MCP_SERVER_NAME}|"${MCP_SERVER_NAME}"|'${MCP_SERVER_NAME}')\\s*[.=]`,
+);
 
 /**
  * Does this config NAME a Reticle server at all, in any shape?

@@ -65,6 +65,9 @@ describe('codexNamesOurServer', () => {
       '[mcp_servers.reticle.env]\nTOKEN = "x"\n',
       '[mcp_servers]\nreticle = { command = "node" }\n',
       'mcp_servers.reticle = { url = "https://example.test/mcp" }\n',
+      // Dotted keys inside an inline table, which a `reticle =` pattern alone misses (found in review).
+      'mcp_servers = { reticle.command = "node", reticle.args = ["/opt/local/server.js"] }\n',
+      'mcp_servers = { other = { command = "foo" }, "reticle".url = "https://example.test/mcp" }\n',
       WIRED.replace('reticle]', '"reticle"]'),
     ]) {
       expect(codexNamesOurServer(config, KEY), config).toBe(true);
@@ -75,6 +78,13 @@ describe('codexNamesOurServer', () => {
     expect(codexNamesOurServer(PROJECT_NAMED_RETICLE, KEY)).toBe(false);
     expect(codexNamesOurServer('# reticle is registered below\n', KEY)).toBe(false);
     expect(codexNamesOurServer('[mcp_servers.other]\ncommand = "reticle"\n', KEY)).toBe(false);
+    // A value that merely starts with the name is not a key, even inside the inline mcp_servers table.
+    expect(
+      codexNamesOurServer(
+        'mcp_servers = { other = { command = "reticle.js", args = ["reticle.js"] } }\n',
+        KEY,
+      ),
+    ).toBe(false);
   });
 });
 
@@ -175,7 +185,7 @@ describe('init on a machine with Codex', () => {
       ...io,
       probe: (command: string, args: readonly string[]) => {
         ran.push(`probe ${command} ${args.join(' ')}`);
-        return 'codex' === command ? codexInstalled : false;
+        return codexAvailableProbe().command === command ? codexInstalled : false;
       },
       exec: (command: string, args: readonly string[]) => {
         ran.push(`exec ${command} ${args.join(' ')}`);
