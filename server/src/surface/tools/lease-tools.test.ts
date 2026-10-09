@@ -31,6 +31,7 @@ import {
 import type { Session } from '@/portal/session/session.js';
 import { ReticleTool } from '@reticlehq/core';
 import type { ToolDeps } from './tool-kit.js';
+import { claimedArtifactRoot } from '@/memory/project/root-claims.js';
 import type { BrowserPool, Lease } from '@/portal/pool/browser-pool.js';
 
 function tool(name: string): (deps: ToolDeps, args: Record<string, unknown>) => Promise<unknown> {
@@ -174,6 +175,24 @@ describe('a lease the platform opens for a drive', () => {
   });
 });
 
+/*
+ * A lease opened by `reticle try` or a chat drive wrote wherever the page's project id resolved —
+ * `~/.reticle/unmatched/` for an app with none — so the run never synced and try's wait timed out.
+ */
+describe('a lease opened for a caller’s project', () => {
+  it('writes into the root the caller named, from the moment its page registers', async () => {
+    const { pool, acquired } = fakePool();
+    await tool(ReticleTool.LEASE_ACQUIRE)(
+      { ...baseDeps, pool },
+      { url: 'http://localhost:3100/', root: '/work/shop/.reticle' },
+    );
+    const leaseId = acquired[0]?.sessionId ?? '';
+    expect(claimedArtifactRoot(leaseId, acquired[0]?.url)).toBe('/work/shop/.reticle');
+    await tool(ReticleTool.LEASE_RELEASE)({ ...baseDeps, pool }, { sessionId: leaseId });
+    expect(claimedArtifactRoot(leaseId, undefined)).toBeUndefined();
+  });
+});
+
 describe('cleanNavError', () => {
   it('extracts the net:: code from a noisy Playwright goto error (ANSI + call log stripped)', () => {
     const raw = `page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:5999/?__reticle_session=lease-x\nCall log:\n\u001b[2m  - navigating\u001b[22m`;
@@ -207,6 +226,31 @@ describe('reticle_lease_acquire failure surfaces a clean message', () => {
     ).rejects.toThrow(
       /could not open http:\/\/localhost:3000\/ — is the app running there\? \(net::ERR_CONNECTION_REFUSED\)/,
     );
+  });
+
+  // A cold dev server compiling a route for the first time can outlast the navigation budget. The
+  // app is running; "is the app running there?" sends the agent hunting for a missing server
+  // instead of retrying (#1460).
+  it('a navigation timeout says the page did not finish loading, and leads with the retry', async () => {
+    const pool = {
+      acquire: () =>
+        Promise.reject(
+          new Error(
+            'page.goto: Timeout 30000ms exceeded.\nCall log:\n  - navigating to "http://localhost:3000/", waiting until "load"',
+          ),
+        ),
+      leaseIdOnOrigin: () => undefined,
+      activeCount: () => 0,
+      queuedCount: () => 0,
+    } as unknown as BrowserPool;
+    const acquire = tool(ReticleTool.LEASE_ACQUIRE)(
+      { ...baseDeps, pool },
+      { url: 'http://localhost:3000/' },
+    );
+    await expect(acquire).rejects.toThrow(
+      /could not open http:\/\/localhost:3000\/ — the page did not finish loading within 30 s \(navigation timed out\)\. If the app is running, .*retry the acquire\. If it is not running, start it first\./,
+    );
+    await expect(acquire).rejects.not.toThrow(/is the app running there/);
   });
 });
 
@@ -557,6 +601,50 @@ describe('reticle_lease_acquire', () => {
     // A generous per-test budget, not a duration assertion: this is the ONLY case that pays the
     // real readiness wait, because proving "no SDK ever dialled in" means letting it run out.
   }, 20_000);
+
+  it('does not report a freshly minted lease ready while its tab is hidden (#1351)', async () => {
+    // A hidden tab throttles timers and rAF: the SDK dialled in, yet nothing on the page can be
+    // verified. Neither existing reason fits — the install is fine and the tab is answering.
+    const { pool } = fakePool();
+    const hiddenTab = {
+      info: () => ({ hidden: true }),
+      command: () => Promise.resolve({ ok: true }),
+    };
+    const sessions = { get: () => hiddenTab, all: () => [] };
+
+    const result = (await tool(ReticleTool.LEASE_ACQUIRE)(
+      { ...baseDeps, pool, sessions } as unknown as ToolDeps,
+      { url: 'http://localhost:3000/' },
+    )) as { ready: boolean; notReadyReason?: string };
+
+    expect(result.ready).toBe(false);
+    expect(result.notReadyReason).toBe(LeaseNotReadyReason.TAB_HIDDEN);
+  });
+
+  it('does not report a reused lease ready while its tab is hidden', async () => {
+    const { pool } = fakePool();
+    const first = (await tool(ReticleTool.LEASE_ACQUIRE)(
+      { ...baseDeps, pool },
+      { url: 'http://localhost:3000/' },
+    )) as { sessionId: string };
+    const hiddenTab = {
+      info: () => ({ hidden: true }),
+      command: () => Promise.resolve({ ok: true }),
+    };
+    const sessions = {
+      get: (i: string) => (i === first.sessionId ? hiddenTab : undefined),
+      all: () => [],
+    };
+
+    const second = (await tool(ReticleTool.LEASE_ACQUIRE)(
+      { ...baseDeps, pool, sessions } as unknown as ToolDeps,
+      { url: 'http://localhost:3000/' },
+    )) as { ready: boolean; reused?: boolean; notReadyReason?: string };
+
+    expect(second.reused).toBe(true);
+    expect(second.ready).toBe(false);
+    expect(second.notReadyReason).toBe(LeaseNotReadyReason.TAB_HIDDEN);
+  });
 
   it('treats a session it cannot probe as alive, rather than failing a working lease', async () => {
     // Fail OPEN. A registry entry with no `command` is a shape this code did not put there, and
